@@ -11,7 +11,7 @@ on:
         required: true
 
 env:
-  LANG: ${{ vars.LANG }}
+  LANG: ${{ vars.LANG }}  # <- variable de repositorio, no secret
 
 jobs:
   fetch-events:
@@ -35,10 +35,6 @@ jobs:
             -H "User-Agent: GitHubAction/1.0" \
             -o api_response.json
 
-      - name: Save response for cache
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: echo "Response fetched and cached"
-
       - name: Upload API response as artifact (debug)
         uses: actions/upload-artifact@v4
         with:
@@ -46,13 +42,18 @@ jobs:
           path: api_response.json
           retention-days: 1
 
-      - name: Extract events count
+      - name: Extract events count and matrix
         id: extract
-        run: |
-          count=$(jq '.selected | length' api_response.json)
-          echo "EVENTS_COUNT=$count" >> $GITHUB_ENV
-          echo "matrix=$(jq -c '[.selected[] | {title: .pages[0].title, url: .pages[0].content_urls.desktop.page}]' api_response.json)" >> $GITHUB_OUTPUT
         shell: bash
+        run: |
+          set -euo pipefail
+          test -f api_response.json || { echo "matrix=[]" >> "$GITHUB_OUTPUT"; exit 0; }
+          count=$(jq '(.selected // []) | length' api_response.json)
+          echo "EVENTS_COUNT=$count" >> "$GITHUB_ENV"
+          matrix=$(jq -c '[(.selected // [])[] 
+              | {title: (.pages[0].title // "Untitled"),
+                 url:   (.pages[0].content_urls.desktop.page // "")}]' api_response.json)
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
     outputs:
       matrix: ${{ steps.extract.outputs.matrix }}
@@ -64,21 +65,38 @@ jobs:
       fail-fast: false
       matrix:
         event: ${{ fromJson(needs.fetch-events.outputs.matrix) }}
+
     steps:
+      - name: Install wkhtmltopdf (with xvfb)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb wkhtmltopdf
+
       - name: Generate PDF from URL
-        uses: cloudflare/html-to-pdf-action@v1
-        with:
-          url: ${{ matrix.event.url }}
-          output: "event.pdf"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ matrix.event.url }}" ]; then
+            echo "No URL, skipping."
+            exit 0
+          fi
+          # Algunas páginas requieren X; xvfb-run lo provee.
+          xvfb-run -a wkhtmltopdf \
+            --print-media-type \
+            --enable-javascript \
+            --javascript-delay 2000 \
+            "${{ matrix.event.url }}" event.pdf
 
       - name: Rename PDF
+        if: success() && hashFiles('event.pdf') != ''
         run: |
           safe_title=$(echo "${{ matrix.event.title }}" | tr ' ' '_' | tr -cd '[:alnum:]_-')
           mv event.pdf "${{ github.event.inputs.month }}-${{ github.event.inputs.day }}-${safe_title}.pdf"
 
       - name: Upload PDF artifact
+        if: success() && hashFiles('*.pdf') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.month }}-${{ github.event.inputs.day }}-${{ matrix.event.title }}
+          name: ${{ github.event.inputs.month }}-${{ github.event.inputs.day }}
           path: "*.pdf"
           retention-days: 1
