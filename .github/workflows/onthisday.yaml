@@ -1,0 +1,84 @@
+name: OnThisDay PDF Export
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: 'Mes en formato MM'
+        required: true
+      day:
+        description: 'Día en formato DD'
+        required: true
+
+env:
+  LANG: ${{ secrets.LANG }}
+
+jobs:
+  fetch-events:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set cache key
+        id: vars
+        run: echo "CACHE_KEY=${{ env.LANG }}-${{ github.event.inputs.month }}-${{ github.event.inputs.day }}" >> $GITHUB_ENV
+
+      - name: Restore API cache
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: ./api_response.json
+          key: ${{ env.CACHE_KEY }}
+
+      - name: Fetch API response
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl -s "https://api.wikimedia.org/feed/v1/wikipedia/${{ env.LANG }}/onthisday/selected/${{ github.event.inputs.month }}/${{ github.event.inputs.day }}" \
+            -H "User-Agent: GitHubAction/1.0" \
+            -o api_response.json
+
+      - name: Save response for cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: echo "Response fetched and cached"
+
+      - name: Upload API response as artifact (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-response
+          path: api_response.json
+          retention-days: 1
+
+      - name: Extract events count
+        id: extract
+        run: |
+          count=$(jq '.selected | length' api_response.json)
+          echo "EVENTS_COUNT=$count" >> $GITHUB_ENV
+          echo "matrix=$(jq -c '[.selected[] | {title: .pages[0].title, url: .pages[0].content_urls.desktop.page}]' api_response.json)" >> $GITHUB_OUTPUT
+        shell: bash
+
+    outputs:
+      matrix: ${{ steps.extract.outputs.matrix }}
+
+  generate-pdfs:
+    needs: fetch-events
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        event: ${{ fromJson(needs.fetch-events.outputs.matrix) }}
+    steps:
+      - name: Generate PDF from URL
+        uses: cloudflare/html-to-pdf-action@v1
+        with:
+          url: ${{ matrix.event.url }}
+          output: "event.pdf"
+
+      - name: Rename PDF
+        run: |
+          safe_title=$(echo "${{ matrix.event.title }}" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+          mv event.pdf "${{ github.event.inputs.month }}-${{ github.event.inputs.day }}-${safe_title}.pdf"
+
+      - name: Upload PDF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.month }}-${{ github.event.inputs.day }}-${{ matrix.event.title }}
+          path: "*.pdf"
+          retention-days: 1
