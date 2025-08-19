@@ -11,7 +11,7 @@ on:
         required: true
 
 env:
-  LANG: ${{ vars.LANG }}  # <- variable de repositorio, no secret
+  LANG: ${{ vars.LANG }}  # Variable de repositorio (no secret)
 
 jobs:
   fetch-events:
@@ -80,7 +80,6 @@ jobs:
             echo "No URL, skipping."
             exit 0
           fi
-          # Algunas páginas requieren X; xvfb-run lo provee.
           xvfb-run -a wkhtmltopdf \
             --print-media-type \
             --enable-javascript \
@@ -88,15 +87,19 @@ jobs:
             "${{ matrix.event.url }}" event.pdf
 
       - name: Rename PDF
+        id: rename
         if: success() && hashFiles('event.pdf') != ''
         run: |
           safe_title=$(echo "${{ matrix.event.title }}" | tr ' ' '_' | tr -cd '[:alnum:]_-')
-          mv event.pdf "${{ github.event.inputs.month }}-${{ github.event.inputs.day }}-${safe_title}.pdf"
+          new_name="${{ github.event.inputs.month }}-${{ github.event.inputs.day }}-${safe_title}.pdf"
+          mv event.pdf "$new_name"
+          echo "SAFE_TITLE=$safe_title" >> "$GITHUB_OUTPUT"
+          echo "PDF_NAME=$new_name" >> "$GITHUB_OUTPUT"
 
       - name: Upload PDF artifact
-        if: success() && hashFiles('*.pdf') != ''
+        if: success() && steps.rename.outputs.PDF_NAME != ''
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.month }}-${{ github.event.inputs.day }}
-          path: "*.pdf"
+          name: ${{ github.event.inputs.month }}-${{ github.event.inputs.day }}-${{ steps.rename.outputs.SAFE_TITLE }}
+          path: ${{ steps.rename.outputs.PDF_NAME }}
           retention-days: 1
