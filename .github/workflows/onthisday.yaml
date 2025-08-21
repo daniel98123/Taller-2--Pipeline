@@ -4,34 +4,43 @@ on:
   workflow_dispatch:
     inputs:
       month:
-        description: 'Mes en formato MM'
+        description: "Mes en formato MM"
         required: true
+        type: string
       day:
-        description: 'Día en formato DD'
+        description: "Día en formato DD"
         required: true
+        type: string
+
+permissions:
+  contents: read
 
 env:
-  LANG: ${{ vars.LANG }}  # Variable de repositorio (no secret)
+  # 4) LANG proviene de variable de entorno de repositorio (no secreto)
+  LANG: ${{ vars.LANG }}
 
 jobs:
   fetch-events:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.extract.outputs.matrix }}
     steps:
       - name: Set cache key
         id: vars
-        run: echo "CACHE_KEY=${{ env.LANG }}-${{ github.event.inputs.month }}-${{ github.event.inputs.day }}" >> $GITHUB_ENV
+        run: |
+          echo "CACHE_KEY=${{ env.LANG }}-${{ github.event.inputs.month }}-${{ github.event.inputs.day }}" >> $GITHUB_ENV
 
       - name: Restore API cache
         id: cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ./api_response.json
           key: ${{ env.CACHE_KEY }}
 
-      - name: Fetch API response
+      - name: Fetch API response (only if cache miss)
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          curl -s "https://api.wikimedia.org/feed/v1/wikipedia/${{ env.LANG }}/onthisday/selected/${{ github.event.inputs.month }}/${{ github.event.inputs.day }}" \
+          curl -fsSL "https://api.wikimedia.org/feed/v1/wikipedia/${{ env.LANG }}/onthisday/selected/${{ github.event.inputs.month }}/${{ github.event.inputs.day }}" \
             -H "User-Agent: GitHubAction/1.0" \
             -o api_response.json
 
@@ -42,44 +51,42 @@ jobs:
           path: api_response.json
           retention-days: 1
 
-      - name: Extract events count and matrix
+      - name: Install jq
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Extract events matrix (only with URL + title)
         id: extract
         shell: bash
         run: |
           set -euo pipefail
-          test -f api_response.json || { echo "matrix=[]" >> "$GITHUB_OUTPUT"; exit 0; }
-          count=$(jq '(.selected // []) | length' api_response.json)
-          echo "EVENTS_COUNT=$count" >> "$GITHUB_ENV"
-          matrix=$(jq -c '[(.selected // [])[] 
-              | {title: (.pages[0].title // "Untitled"),
-                 url:   (.pages[0].content_urls.desktop.page // "")}]' api_response.json)
+          test -f api_response.json || { echo 'matrix=[]' >> "$GITHUB_OUTPUT"; exit 0; }
+          matrix=$(jq -c '
+            [(.selected // [])
+              | .[]
+              | select(.pages and .pages[0].content_urls.desktop.page and .pages[0].title)
+              | { title: .pages[0].title
+                , url:   .pages[0].content_urls.desktop.page }]
+          ' api_response.json)
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
-
-    outputs:
-      matrix: ${{ steps.extract.outputs.matrix }}
 
   generate-pdfs:
     needs: fetch-events
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: false             # 9) resiliente: si un paralelo falla, los demás siguen
       matrix:
         event: ${{ fromJson(needs.fetch-events.outputs.matrix) }}
 
     steps:
       - name: Install wkhtmltopdf (with xvfb)
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y xvfb wkhtmltopdf
 
       - name: Generate PDF from URL
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${{ matrix.event.url }}" ]; then
-            echo "No URL, skipping."
-            exit 0
-          fi
           xvfb-run -a wkhtmltopdf \
             --print-media-type \
             --enable-javascript \
@@ -88,7 +95,7 @@ jobs:
 
       - name: Rename PDF
         id: rename
-        if: success() && hashFiles('event.pdf') != ''
+        if: success()
         run: |
           safe_title=$(echo "${{ matrix.event.title }}" | tr ' ' '_' | tr -cd '[:alnum:]_-')
           new_name="${{ github.event.inputs.month }}-${{ github.event.inputs.day }}-${safe_title}.pdf"
@@ -97,7 +104,7 @@ jobs:
           echo "PDF_NAME=$new_name" >> "$GITHUB_OUTPUT"
 
       - name: Upload PDF artifact
-        if: success() && steps.rename.outputs.PDF_NAME != ''
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.month }}-${{ github.event.inputs.day }}-${{ steps.rename.outputs.SAFE_TITLE }}
